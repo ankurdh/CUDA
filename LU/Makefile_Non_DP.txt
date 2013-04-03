@@ -1,0 +1,2 @@
+LU:
+	/usr/local/cuda/bin/nvcc -I/usr/local/cuda/include -L/usr/local/cuda/lib64 -lcuda -lcudart -lm -arch=sm_35 -rdc=true -o lu_non_dynamic.out lu_non_dynamic.cu -lcudadevrt

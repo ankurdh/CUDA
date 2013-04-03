@@ -1,0 +1,222 @@
+#include<cuda.h>
+#include<stdio.h>
+
+#define MAX_BLOCK_SIZE 32
+
+__global__  void setupLUMatrices(float *inputMat, float *lMat, float *uMat, int beginIndex, const int copyIndex, const int MAT_SIZE)
+{
+
+    beginIndex += threadIdx.x;
+
+    lMat[beginIndex * MAT_SIZE + copyIndex] = inputMat[beginIndex * MAT_SIZE + copyIndex]/uMat[copyIndex * MAT_SIZE + copyIndex];
+    uMat[copyIndex * MAT_SIZE + beginIndex] = inputMat[copyIndex * MAT_SIZE + beginIndex];
+
+}
+
+__global__ void modifyInputMatrix(float *inputMat,const float *lMat,const float *uMat, const int beginIndex, const int evaluationIndex, const int MAT_SIZE)
+{
+    int threadCol = (blockIdx.x * blockDim.x + threadIdx.x) + beginIndex;
+    int threadRow = (blockIdx.y * blockDim.y + threadIdx.y) + beginIndex;
+
+    if(threadCol < MAT_SIZE && threadRow < MAT_SIZE){
+        inputMat[threadRow * MAT_SIZE + threadCol] -= lMat[threadRow * MAT_SIZE + evaluationIndex] * uMat[evaluationIndex * MAT_SIZE + threadCol];
+    }
+}
+
+void printMat(float * mat, const char * msg, const int MAT_SIZE)
+{
+    if(MAT_SIZE > 5)
+        return;
+
+    printf("%s:\n", msg);
+    for(int i = 0 ; i < MAT_SIZE ; i ++)
+    {
+        for(int j = 0 ; j < MAT_SIZE ; j ++)
+            printf("   %5.2f", mat[i * MAT_SIZE + j]);
+            printf("\n");
+    }
+}
+
+bool checkIfMatricesProper(const float * lMat, const float *uMat, const float *inputMat, const int MAT_SIZE)
+{
+
+    float * productMat = (float *)malloc(sizeof(float) * MAT_SIZE * MAT_SIZE);
+     for(int i = 0 ; i < MAT_SIZE ; i ++)
+         for(int j = 0 ; j < MAT_SIZE ; j ++)
+         {
+             float sum = 0.0f;
+             for(int k = 0 ; k < MAT_SIZE ; k ++)
+                 sum += lMat[i * MAT_SIZE + k] * uMat[k * MAT_SIZE + j];
+ 
+             productMat[i * MAT_SIZE + j] = sum;
+         }
+ 
+     printMat(productMat, "L-U Product Matrix: ", MAT_SIZE);
+ 
+     bool err = true;
+     float maxDiff = 0.0f;
+     int misMatchValueCounter = 0;
+ 
+     for(int i = 0 ; i < MAT_SIZE ; i ++)
+         for(int j = 0 ; j < MAT_SIZE ; j ++){
+             float diff = fabs(productMat[i * MAT_SIZE + j] - inputMat[i * MAT_SIZE + j]);
+             if(diff > 0.090000000f){
+                 err = false;
+                 misMatchValueCounter++;
+                 if(diff > maxDiff)
+                         maxDiff = diff;
+             }
+         }
+ 
+     if(!err){
+ 
+         printf("Max error: %.8f\n", maxDiff);
+         printf("No. of mismatched values: %d\n", misMatchValueCounter);
+ 
+     }
+ 
+     return err;
+ 
+ }
+ 
+ 
+ void checkError(cudaError_t error, char * function)
+ {
+     if(error != cudaSuccess)
+     {
+         printf("\"%s\" has a problem with error code %d and desc: %s\n", function, error, cudaGetErrorString(error));
+         exit(-1);
+     }
+ 
+     //printf("%s.... Successful.\n", function);
+ 
+ }
+ 
+ void initializeInputMatrix(float *inputMat, const int MAT_SIZE)
+ {
+     srand(34331);
+     for(int i = 0 ; i < MAT_SIZE ; i ++)
+         for(int j = 0 ; j < MAT_SIZE ; j ++)
+             inputMat[i * MAT_SIZE + j] = rand()%10;
+ 
+ }
+ 
+ int main()
+ {
+ 
+     //create cuda event variables
+     cudaEvent_t deviceStart, deviceStop;
+     float timeDifferenceOnDevice;
+ 
+     int MAT_SIZE = 10;
+     printf("Enter matrix size: ");
+     scanf("%d", &MAT_SIZE);
+     printf("Testing on matrix with size: %d and Block Size: %d\n", MAT_SIZE, MAX_BLOCK_SIZE);
+ 
+     size_t size = 0;
+ 
+     //initialize cuda timing variables
+     cudaEventCreate(&deviceStart);
+     cudaEventCreate(&deviceStop);
+ 
+     //matrices
+     float *inputMat = (float *)malloc(sizeof(float) * MAT_SIZE * MAT_SIZE),
+         *lMatrix = (float *)malloc(sizeof(float) * MAT_SIZE * MAT_SIZE),
+         *uMatrix = (float *)malloc(sizeof(float) * MAT_SIZE * MAT_SIZE),
+         *modifiedInputMat = (float *) malloc (sizeof(float) * MAT_SIZE * MAT_SIZE),
+         *inputMatCopy = (float *) malloc (sizeof(float) * MAT_SIZE * MAT_SIZE);
+ 
+    //initialize the lMatrix & uMatrix
+    for(int i = 0 ; i < MAT_SIZE ; i ++){
+        for(int j = 0 ; j < MAT_SIZE ; j ++){
+            lMatrix[i*MAT_SIZE+j] = uMatrix[i*MAT_SIZE+j] = 0;
+
+            if(i == j)
+                lMatrix[i * MAT_SIZE + j] = 1;
+
+        }
+    }
+
+    initializeInputMatrix(inputMat, MAT_SIZE);
+    initializeInputMatrix(inputMatCopy, MAT_SIZE);
+
+    printMat(inputMat, "Input Matrix", MAT_SIZE);
+
+    //matrices for the device
+    float *deviceInputMat, *lMat, *uMat;
+
+    //allocate space for matrices on the device
+    size = MAT_SIZE * MAT_SIZE * sizeof(float);
+    checkError(cudaMalloc((void **)&deviceInputMat, size), "Allocating input matrix on device.");
+    checkError(cudaMalloc((void **)&lMat, size), "Allocating L matrix on device.");
+    checkError(cudaMalloc((void **)&uMat, size), "Allocating U matrix on device.");
+
+    //copy the input matrix to the device
+    checkError(cudaMemcpy(lMat, lMatrix, size, cudaMemcpyHostToDevice), "L Matrix copy.");
+
+    //call the kernels
+    cudaEventRecord(deviceStart, 0);
+    for(int k = 0 ; k < MAT_SIZE ; k ++){
+
+        uMatrix[k * MAT_SIZE + k] = inputMat[k * MAT_SIZE + k];
+
+        checkError(cudaMemcpy(uMat, uMatrix, size, cudaMemcpyHostToDevice), "U Matrix copy.");
+        checkError(cudaMemcpy(deviceInputMat, inputMat, size, cudaMemcpyHostToDevice), "Input Array Copy.");
+
+        setupLUMatrices<<<1, MAT_SIZE-k-1 >>>(deviceInputMat, lMat, uMat, k + 1, k, MAT_SIZE);
+
+        cudaThreadSynchronize();
+        cudaDeviceSynchronize();
+
+         int blockX = MAX_BLOCK_SIZE, blockY = MAX_BLOCK_SIZE;
+ 
+         if(MAT_SIZE-k < MAX_BLOCK_SIZE){
+             blockX = MAT_SIZE-k;
+             blockY = MAT_SIZE-k;
+         }
+ 
+         dim3 block(blockX, blockY);
+         dim3 grid(MAT_SIZE/blockX + 1, MAT_SIZE/blockY + 1);
+         modifyInputMatrix<<<grid, block>>>(deviceInputMat, lMat, uMat, k + 1, k, MAT_SIZE);
+ 
+         cudaThreadSynchronize();
+         cudaDeviceSynchronize();
+ 
+         checkError(cudaMemcpy(uMatrix, uMat, size, cudaMemcpyDeviceToHost), "U Matrix copy from device to host.");
+         checkError(cudaMemcpy(inputMat, deviceInputMat, size, cudaMemcpyDeviceToHost), "Input matrix copy from device to host.");
+ 
+     }
+ 
+     //luDecompose<<<1, 1>>>(deviceInputMat, lMat, uMat, MAT_SIZE);
+     cudaEventRecord(deviceStop, 0);
+     cudaEventSynchronize(deviceStop);
+ 
+     cudaEventElapsedTime(&timeDifferenceOnDevice, deviceStart, deviceStop);
+ 
+     printf("Time taken on GPU: %.3fms\n", timeDifferenceOnDevice);
+ 
+ 
+     checkError(cudaMemcpy(lMatrix, lMat, size, cudaMemcpyDeviceToHost), "L Matrix copy from device.");
+     checkError(cudaMemcpy(uMatrix, uMat, size, cudaMemcpyDeviceToHost), "U Matrix copy from device.");
+     checkError(cudaMemcpy(modifiedInputMat, deviceInputMat, size, cudaMemcpyDeviceToHost), "Input matrix copy from device.");
+ 
+     printMat(modifiedInputMat, "Modified Input Matrix", MAT_SIZE);
+     printMat(lMatrix, "L Matrix", MAT_SIZE);
+     printMat(uMatrix, "U Matrix", MAT_SIZE);
+ 
+     checkError(cudaFree(deviceInputMat), "Freeing input matrix on device.");
+     checkError(cudaFree(lMat), "Freeing L Matrix on device.");
+     checkError(cudaFree(uMat), "Freeing U matrix on device.");
+ 
+     if(checkIfMatricesProper(lMatrix, uMatrix, inputMatCopy, MAT_SIZE))
+         printf("Matrices Proper.\n");
+     else printf("Matrices Improper.\n");
+ 
+     free(lMatrix);
+     free(uMatrix);
+     free(modifiedInputMat);
+     free(inputMat);
+ 
+     return 0;
+ }
+ 

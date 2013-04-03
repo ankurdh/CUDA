@@ -1,0 +1,7 @@
+NVCC = /usr/local/cuda/bin/nvcc
+CUDAPATH = /usr/local/cuda
+NVCCFLAGS = -I$(CUDAPATH)/include
+LFLAGS = -L$(CUDAPATH)/lib64 -lcuda -lcudart -lm
+
+LU:
+        $(NVCC) $(NVCCFLAGS) $(LFLAGS) -arch=sm_35 -rdc=true -o lu.out new_lu.cu -lcudadevrt
